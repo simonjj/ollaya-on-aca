@@ -1,300 +1,407 @@
 <p align="center">
-  <img src="misc/images/architecture.svg" alt="Ollaya routing architecture on Azure Container Apps" width="1000">
+  <img src="misc/images/architecture.svg" alt="MASSIVE intent classification with Ollaya Winnow and Azure OpenAI on Azure Container Apps" width="1000">
 </p>
 
-# Route OpenCode tasks with Ollaya on Azure Container Apps
+# Benchmark Winnow against GPT-5.4 Nano on Azure Container Apps
 
-Run a small decision model once per OpenCode request. Ollaya classifies the current human request as `trivial`, `normal`, or `hard`; the gateway then selects the configured GPT-5.6 tier and reuses that decision throughout the agent loop.
+Deploy an authenticated intent-classification API and compare:
 
-## What you get
+- **Ollaya `winnow:e4b`** on an Azure Container Apps serverless NVIDIA T4 GPU.
+- **Azure OpenAI GPT-5.4 Nano** with strict structured output and managed identity.
+- **Amazon MASSIVE 1.1**, using all 2,974 records in the `en-US` test split.
 
-- **Ollaya + Laya on CPU** in an internal Azure Container App
-- **OpenAI Responses-compatible gateway** for OpenCode
-- **GPT-5.6 Luna** for trivial work
-- **GPT-5.6 Terra** with medium reasoning for normal work
-- **GPT-5.6 Sol** with high reasoning for hard work
-- **Managed identity** from the gateway to Azure OpenAI; no model API keys
-- **Per-request token metrics** and a repeatable OpenCode benchmark
-- **One-command deployment** with `azd up`
+The sample reports intent accuracy, macro-F1, scenario accuracy, calibration, latency, throughput, failures, token usage, and estimated inference cost. It also supports an `ollaya-only` deployment that creates no Azure OpenAI resources.
+
+The original OpenCode routing sample is preserved in the immutable [`ollaya+opencode`](https://github.com/simonjj/ollaya-on-aca/tree/ollaya%2Bopencode) tag.
+
+## Why GPT-5.4 Nano?
+
+GPT-5.4 Nano is the appropriate hosted comparison because the task is bounded classification rather than generation. It is the smallest fast GPT-5.4 tier available in Azure OpenAI, supports strict JSON-schema output, and can classify against the same fixed 18-scenario and 60-intent taxonomy as Winnow.
+
+This is not an equivalence claim. Winnow is a local decision model that returns probabilities; Nano is a hosted generative model constrained to return labels. The benchmark therefore compares task outcomes and operational characteristics, but calibration is reported only for Winnow.
 
 ## Architecture
 
-The client belongs at the start of the request path:
-
 ```text
-USER
-  │
-  ▼
-OpenCode
-  │  POST /v1/responses
-  ▼
-ACA routing gateway
-  │
-  ├── Ollaya + Laya decision (trivial / normal / hard)
-  │
-  ├── trivial ──► GPT-5.6 Luna, reasoning none
-  ├── normal  ──► GPT-5.6 Terra, reasoning medium
-  └── hard    ──► GPT-5.6 Sol, reasoning high
+Benchmark CLI or client
+          |
+          v
+Authenticated classifier API on ACA Consumption
+       |                         |
+       v                         v
+Internal Ollaya             Azure OpenAI
+winnow:e4b on T4            GPT-5.4 Nano
+       |
+       v
+Persistent Azure Files model cache
 ```
 
-OpenCode still owns the agent loop, tools, and repository changes. Ollaya only makes the route decision. The gateway rewrites the model and reasoning effort, forwards the request with managed identity, streams the response unchanged, and records usage from the final Responses API event.
+The public API uses a generated bearer token. Raw Ollaya ingress is internal to the Container Apps environment. Azure OpenAI local keys are disabled; the API calls Nano through a user-assigned managed identity.
 
-The gateway hashes the latest human request and caches its decision for one hour. Tool-loop calls for the same request reuse the route without storing the prompt or running Ollaya again.
+## Published result
 
-## Azure regions
+The benchmark was run on September 30, 2026 against the complete MASSIVE `en-US` test split. Latency and throughput modes ran sequentially so they did not contend with each other.
 
-| Resource | Region | Reason |
-|---|---|---|
-| Azure Container Apps, ACR, Log Analytics | South Central US | Deployment target for this template |
-| GPT-5.6 Luna deployment | East US 2 | Current Azure model availability |
-| GPT-5.6 Terra and Sol deployments | West US | Current Azure model availability |
+<!-- BENCHMARK_RESULTS_START -->
+### Latency mode
 
-The model accounts use Global Standard deployments. Model processing can occur outside the account region under the Global Standard deployment terms.
+Concurrency 1, with all failures counted as incorrect:
+
+| Provider | Successful | Intent accuracy | Intent macro-F1 | Scenario accuracy | p50 | p95 | p99 | Requests/s | Estimated cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Winnow on T4 | 2,974 / 2,974 | 75.59% | 76.40% | 79.89% | 946 ms | 960 ms | 967 ms | 1.059 | $0.2472 GPU time |
+| GPT-5.4 Nano | 2,974 / 2,974 | 79.12% | 78.07% | 85.21% | 1,369 ms | 2,489 ms | 4,555 ms | 0.647 | $0.2462 tokens |
+
+Nano led intent accuracy by 3.53 percentage points. Winnow was 30.9% faster at p50 and 61.4% faster at p95, with a substantially tighter tail.
+
+### Throughput mode
+
+Requested concurrency 8:
+
+| Provider | Successful | Intent accuracy | Intent macro-F1 | Scenario accuracy | p50 request latency | p95 | Requests/s | Estimated cost |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Winnow on T4 | 2,974 / 2,974 | 75.66% | 76.40% | 79.86% | 7,161 ms | 7,196 ms | 1.120 | $0.2336 GPU time |
+| GPT-5.4 Nano | 2,949 / 2,974 | 78.38% | 77.45% | 84.36% | 1,292 ms | 2,476 ms | 1.367 | $0.2458 tokens |
+
+Nano produced 22.0% more requests per second, but 25 requests still failed after eight retries because the deployment exceeded its token-rate limit. The reported 78.38% accuracy counts those failures as incorrect; successful Nano responses retained approximately the same accuracy as latency mode. Of the 2,949 successful requests, 1,303 needed at least one retry.
+
+Winnow completed without failures, but concurrency did not materially raise throughput: its single loaded runner serialized work, so queueing increased median request latency from 946 ms to 7.16 seconds.
+
+### Winnow confidence
+
+Winnow's expected calibration error was 0.0693 in latency mode. Raising the acceptance threshold traded coverage for accuracy:
+
+| Minimum intent probability | Coverage | Accuracy among accepted |
+|---:|---:|---:|
+| 0.50 | 89.74% | 80.48% |
+| 0.70 | 76.33% | 85.81% |
+| 0.80 | 66.78% | 89.22% |
+| 0.90 | 53.73% | 94.43% |
+
+The estimated costs are similar by coincidence and are not equivalent cost scopes. Winnow includes only the T4 GPU meter during benchmark wall time; Nano includes input, cached-input, and output tokens. Winnow's always-warm replica, CPU/memory, storage, logging, registry, and network charges are excluded. Azure Cost Management had not posted actual charges for the resource group when this report was finalized.
+
+See [`benchmarks/results.json`](benchmarks/results.json) for all predictions, probabilities, retries, token usage, timings, errors, and configuration metadata.
+<!-- BENCHMARK_RESULTS_END -->
+
+Treat these measurements as a reproducible comparison of this deployment, not a universal ranking. Region, quota, model revision, cache state, concurrency, and service load all affect latency and cost.
 
 ## Prerequisites
 
-- Azure CLI authenticated with permission to create resources and role assignments
-- Azure Developer CLI (`azd`)
-- An Azure subscription with `Microsoft.App` and `Microsoft.CognitiveServices` registered
-- GPT-5.6 Global Standard quota for Luna in East US 2 and Sol in West US
-- OpenCode for the end-user and benchmark flows
+- Azure CLI authenticated to the target subscription.
+- Azure Developer CLI (`azd`).
+- Node.js 22 or later.
+- Permission to create resource groups, role assignments, Container Apps environments, ACR, Storage, and Azure OpenAI resources.
+- `Consumption-GPU-NC8as-T4` availability in South Central US.
+- For `full` mode, GPT-5.4 Nano Global Standard quota in East US 2.
 
-Check quota:
+Check the required capacity:
 
 ```powershell
-az cognitiveservices usage list --location eastus2 `
-  --query "[?contains(name.value, 'gpt-5.6-luna')]" -o table
+az containerapp env workload-profile list-supported `
+  --location southcentralus `
+  --query "[?name=='Consumption-GPU-NC8as-T4']" -o table
 
-az cognitiveservices usage list --location westus `
-  --query "[?contains(name.value, 'gpt-5.6-terra') || contains(name.value, 'gpt-5.6-sol')]" -o table
+az cognitiveservices usage list `
+  --location eastus2 `
+  --query "[?name.value=='OpenAI.GlobalStandard.gpt-5.4-nano']" -o table
 ```
 
-## Quick start
+The preprovision hook repeats these checks and stops with an explicit error rather than silently choosing another region or model.
+
+## Deploy
+
+### Full comparison
 
 ```powershell
 git clone https://github.com/simonjj/ollaya-on-aca.git
 cd ollaya-on-aca
 
-azd env new ollaya-test-1
-azd env set AZURE_RESOURCE_GROUP ollaya-test-1
+azd env new ollaya-test-2
+azd env set AZURE_RESOURCE_GROUP ollaya-test-2
 azd env set AZURE_LOCATION southcentralus
+azd env set DEPLOYMENT_MODE full
+azd env set NANO_CAPACITY 100
 azd up
 ```
 
-`azd up` creates the infrastructure, builds both images in ACR, deploys the internal Ollaya app and public router app, waits for Laya to load, tests one route, calls Azure OpenAI, and writes an ignored `opencode.local.json`.
-
-Each run uses a unique UTC image tag. ACA revisions therefore reference an immutable build instead of relying on a mutable `latest` tag.
-
-## Connect OpenCode
-
-Use the generated local config:
+### Ollaya only
 
 ```powershell
-$env:OPENCODE_CONFIG = "$PWD\opencode.local.json"
-opencode
+azd env new ollaya-only
+azd env set AZURE_RESOURCE_GROUP ollaya-only
+azd env set AZURE_LOCATION southcentralus
+azd env set DEPLOYMENT_MODE ollaya-only
+azd up
 ```
 
-Or start from `opencode.example.json`:
+`ollaya-only` deploys the T4 workload, persistent model cache, internal Ollaya app, and authenticated classifier API. It does not create an Azure OpenAI account, deployment, or role assignment. Calls to `/v1/classify/azure` return `503`.
+
+Both modes default to one warm GPU replica:
 
 ```powershell
-$env:OLLAYA_ROUTER_ENDPOINT = azd env get-value ROUTER_ENDPOINT
-$env:OLLAYA_ROUTER_API_KEY = azd env get-value ROUTER_API_KEY
-$env:OPENCODE_CONFIG = "$PWD\opencode.example.json"
-
-opencode run -m "ollaya-aca/ollaya-auto" "Add validation to the user creation endpoint."
+azd env set GPU_MIN_REPLICAS 1
 ```
 
-The provider uses `@ai-sdk/openai`, not `@ai-sdk/openai-compatible`, because coding-agent tool calls need the Responses API.
+Set `GPU_MIN_REPLICAS=0` to reduce idle cost, accepting T4 allocation, container startup, model loading, and warm-up latency after scale-to-zero.
 
-## Inspect a route
+## First deployment and model persistence
+
+The Ollaya app mounts an SMB Azure Files share at:
+
+```text
+/home/ollaya/.ollaya/models
+```
+
+The main startup script:
+
+1. Starts the Ollaya server.
+2. Pulls `winnow:e4b` into the persistent share.
+3. Creates `massive-classifier` from the checked-in taxonomy.
+4. Runs a real decision to load and warm the model.
+5. Keeps the server running.
+
+The API readiness check then performs another real Winnow decision and verifies `/api/ps` reports `device=cuda:*` with nonzero VRAM. A CPU-loaded model cannot pass deployment readiness.
+
+Observed behavior in South Central US:
+
+| Measurement | Observed |
+|---|---:|
+| First `winnow:e4b` pull into an empty Azure Files share | 4,599 s / 76 min 39 s |
+| Cached model load on a new revision | 108.3 s |
+| Cached revision creation to API readiness | 291.1 s |
+| First successful post-load classification | 977.5 ms |
+
+The persistent cache avoided another 8 GB registry transfer: the subsequent revision reused all model layers immediately. The longer 291-second readiness measurement includes ACA revision scheduling and one in-flight internal request that crossed the platform's 240-second stream timeout; the next readiness attempt completed in under one second.
+
+### Why the pull stays in the main container
+
+An init container would separate download and serving lifecycles, but it would use the same registry, Azure Files share, and network transfer. It would not make the initial 8 GB download faster, and the main container still has to create and warm the derived model. The tested main-container pull is simpler, persists successfully across revisions, and keeps readiness tied to an actual classification.
+
+If a 75-minute clean deployment is unacceptable, the practical next optimization is to bake the pinned Winnow blobs into the image or publish a pre-seeded model volume. An init-container-only change does not address the transfer bottleneck.
+
+### CUDA compatibility
+
+The image pins Ollaya's CUDA 12 build:
+
+```dockerfile
+FROM ghcr.io/ollaya-dev/ollaya:cuda12@sha256:352443b1c49bf77942d2984026a0b7f2824984a25bfddfcd7dcfdc1e182be20a
+```
+
+The default CUDA 13 image loaded the model but failed its first T4 kernel with:
+
+```text
+CUDA error: the provided PTX was compiled with an unsupported toolchain
+```
+
+The CUDA 12 compatibility image runs the same model on `cuda:0` and allocates 8,005,457,221 model bytes to VRAM.
+
+## Call the API
+
+`azd up` writes an ignored `classifier.local.json` and stores the endpoint and bearer token in the selected azd environment.
 
 ```powershell
-$endpoint = azd env get-value ROUTER_ENDPOINT
-$key = azd env get-value ROUTER_API_KEY
+$endpoint = azd env get-value CLASSIFIER_ENDPOINT
+$key = azd env get-value CLASSIFIER_API_KEY
+$headers = @{ Authorization = "Bearer $key" }
+$body = @{ text = "set an alarm for seven tomorrow morning" } | ConvertTo-Json
 
 Invoke-RestMethod `
   -Method Post `
-  -Uri "$endpoint/route" `
-  -Headers @{ Authorization = "Bearer $key" } `
-  -ContentType "application/json" `
-  -Body '{"input":"Rename one variable and update its test."}'
-```
-
-Example shape:
-
-```json
-{
-  "route": "trivial",
-  "reasons": ["ollaya:trivial"],
-  "topProbability": 0.81,
-  "margin": 0.63,
-  "deepReasoning": 0.08,
-  "complexity": 0.24,
-  "ollayaDurationMs": 34.2
-}
-```
-
-Near-uniform decisions are promoted to `normal`. A high deep-reasoning, complexity, or concurrency-state score promotes the request to `hard`.
-
-## Direct Responses API
-
-```powershell
-$body = @{
-  model = "ollaya-auto"
-  input = "Return a JSON object with the keys name and language for this repository."
-  stream = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "$endpoint/v1/responses" `
-  -Headers @{ Authorization = "Bearer $key" } `
+  -Uri "$endpoint/v1/classify/winnow" `
+  -Headers $headers `
   -ContentType "application/json" `
   -Body $body
 ```
 
-Use `ollaya-baseline` to bypass Ollaya and send every request to GPT-5.6 Sol with high reasoning.
-
-## Token-per-task benchmark
-
-The benchmark runs the same three validated OpenCode tasks in two modes:
-
-1. `ollaya-auto`: Ollaya selects the tier for each agent request.
-2. `ollaya-baseline`: every agent request uses GPT-5.6 Sol with high reasoning.
-
-The gateway resets its in-memory metrics and decision cache before each run. It records input and output tokens from every Responses API call, reports reasoning tokens separately, and adds Ollaya's local decision-model input tokens to an all-model total. A task counts only when its validation command passes.
+Compare both providers:
 
 ```powershell
-$env:OLLAYA_ROUTER_ENDPOINT = azd env get-value ROUTER_ENDPOINT
-$env:OLLAYA_ROUTER_API_KEY = azd env get-value ROUTER_API_KEY
-node .\scripts\benchmark.mjs
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$endpoint/v1/classify/compare" `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $body
 ```
 
-Results are written to `benchmarks/results.json`.
+API surface:
 
-<!-- BENCHMARK_RESULTS_START -->
-Measured on September 30, 2026 with OpenCode 1.18.32. Each cell is one validated run, so these numbers are a reproducible sample rather than a statistically stable model comparison.
+| Method | Path | Authentication | Purpose |
+|---|---|---|---|
+| `GET` | `/healthz` | None | API process health |
+| `GET` | `/readyz` | None | Real Winnow decision plus CUDA/VRAM validation |
+| `GET` | `/v1/taxonomy` | Bearer | Checked-in MASSIVE taxonomy |
+| `POST` | `/v1/classify/winnow` | Bearer | Winnow classification and probabilities |
+| `POST` | `/v1/classify/azure` | Bearer | GPT-5.4 Nano structured classification |
+| `POST` | `/v1/classify/compare` | Bearer | Run both providers concurrently for one utterance |
 
-| Task | Routed tier | Routed downstream tokens | Baseline downstream tokens | Routed tokens including Ollaya | All-model change | Routed duration | Baseline duration |
-|---|---|---:|---:|---:|---:|---:|---:|
-| Exact one-line file | Luna | 12,673 | 19,445 | 13,025 | -33.0% | 11.4 s | 19.4 s |
-| Shopping-cart feature | Terra | 88,569 | 78,170 | 89,485 | +14.5% | 169.4 s | 155.0 s |
-| Concurrent-cache repair | Sol | 118,034 | 97,015 | 119,098 | +22.8% | 355.3 s | 283.8 s |
-| **Total** | mixed | **219,276** | **194,630** | **221,608** | **+13.9%** | **536.1 s** | **458.2 s** |
+## Reproduce the benchmark
 
-The routed run used 12.7% more downstream tokens and 13.9% more tokens after including 2,332 local Ollaya input tokens. It was 17.0% slower overall. The trivial task benefited substantially, but this sample does not support an overall token-reduction claim.
-
-The hard task used Sol with high reasoning in both modes, yet the two runs still differed by 22.8% in all-model tokens. That spread shows why a single coding-agent run should not be treated as a deterministic model benchmark. Use repeated trials before making a capacity or cost decision.
-
-Decision caching did work as intended: the 78 routed model requests caused three Ollaya evaluations, one per task, and 75 cache hits. The uncached CPU decisions added 3.5-5.6 seconds per task in this deployment; cached calls added no Ollaya inference time. See [`benchmarks/results.json`](benchmarks/results.json) for the request-level totals.
-<!-- BENCHMARK_RESULTS_END -->
-
-## API surface
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/healthz` | Gateway and Ollaya readiness |
-| `GET` | `/v1/models` | `ollaya-auto` and `ollaya-baseline` |
-| `POST` | `/v1/responses` | OpenAI Responses-compatible routed inference |
-| `POST` | `/route` | Decision only; no generative model call |
-| `GET` | `/admin/metrics` | In-memory request and token metrics |
-| `DELETE` | `/admin/metrics` | Reset benchmark metrics |
-
-All endpoints except `/healthz` require `Authorization: Bearer <ROUTER_API_KEY>`.
-
-## Local container validation with WSL Containers
+Install the benchmark dependency:
 
 ```powershell
-wslc build -t ollaya-on-aca-ollaya .\app\ollaya
-wslc build -t ollaya-on-aca-router .\app\router
-
-wslc run -d --rm -p 11435:11435 --name ollaya-router-model ollaya-on-aca-ollaya
-
-# Wait for the model to load, then inspect a decision directly.
-curl.exe http://localhost:11435/api/decide `
-  -H "Content-Type: application/json" `
-  -d '{"model":"coding-router","state":"Rename one variable and update the test."}'
+npm ci
 ```
 
-The gateway's Azure calls require managed identity, so the local smoke test focuses on image startup and Ollaya classification. Unit tests cover request extraction, safety promotion, backend selection, and request rewriting.
+Set the deployed endpoint:
 
 ```powershell
-cd app\router
-npm install
-npm test
+$env:CLASSIFIER_ENDPOINT = azd env get-value CLASSIFIER_ENDPOINT
+$env:CLASSIFIER_API_KEY = azd env get-value CLASSIFIER_API_KEY
 ```
+
+Smoke test 30 deterministic records:
+
+```powershell
+npm run benchmark -- `
+  --profile smoke `
+  --provider both `
+  --mode both `
+  --concurrency 8 `
+  --output .\benchmark-work\smoke.json
+```
+
+Run all 2,974 test records:
+
+```powershell
+npm run benchmark -- `
+  --profile standard `
+  --provider both `
+  --mode both `
+  --concurrency 8 `
+  --output .\benchmarks\results.json
+```
+
+`--mode both` runs latency mode at concurrency 1 and then throughput mode at the requested bounded concurrency. Providers and modes are sequential, preventing one measurement from loading the service used by another.
+
+The CLI downloads the official MASSIVE 1.1 archive, verifies this pinned SHA-256, and extracts only the `en-US` data and attribution files:
+
+```text
+4cba5faa11c71437928e17cb1b9b3d8b8e727e7ea363a3a9a8045e19c0491577
+```
+
+The dataset is not committed. Amazon MASSIVE is licensed under CC BY 4.0; see its [repository and attribution](https://github.com/alexa/massive).
+
+### Cost inputs
+
+The report reads optional retail rates from environment variables:
+
+```powershell
+$env:AZURE_INPUT_USD_PER_MILLION = "0.20"
+$env:AZURE_CACHED_INPUT_USD_PER_MILLION = "0.02"
+$env:AZURE_OUTPUT_USD_PER_MILLION = "1.25"
+$env:T4_USD_PER_SECOND = "0.000088"
+```
+
+These September 30, 2026 USD retail meters correspond to GPT-5.4 Nano Global Standard input, cached input, output, and the South Central US `Standard NC T4 v3 GPU Usage` meter. Confirm current rates through the [Azure Retail Prices API](https://prices.azure.com/api/retail/prices) before making a cost decision.
+
+The Winnow estimate covers the GPU meter during measured benchmark elapsed time. It does not include idle time, CPU/memory meters, storage, logging, ACR, or networking. Azure Cost Management charges can arrive after the run, so the report keeps retail estimates separate from billed cost.
+
+## Benchmark methodology
+
+- Dataset: Amazon MASSIVE 1.1.
+- Locale and split: complete `en-US` test partition.
+- Records: 2,974, sorted deterministically by record ID.
+- Taxonomy: 18 scenarios and 60 intents from `app/taxonomy.json`.
+- Primary metric: intent accuracy.
+- Secondary metrics: intent macro-F1 and scenario accuracy.
+- Winnow-only metrics: expected calibration error and accuracy-versus-coverage.
+- Latency: client-observed p50, p95, and p99; server/model duration remains in each row.
+- Throughput: total requests divided by wall-clock elapsed time at bounded concurrency.
+- Retries: up to eight attempts for `429` and `5xx`, with `Retry-After` or exponential backoff.
+- Failures: retained as incorrect rows and counted in the summary.
+- Nano output: strict JSON schema with `reasoning.effort=none`.
+- Nano confidence: intentionally omitted; a generated confidence number is not treated as equivalent to Winnow probabilities.
+
+The machine-readable report includes every prediction, retry count, timing, usage result, record ID, dataset digest, implementation commit, model versions, image digests, regions, workload profile, replica count, startup measurements, concurrency, and pricing inputs.
 
 ## Configuration
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `LUNA_CAPACITY` | `10` | Global Standard deployment capacity |
-| `TERRA_CAPACITY` | `10` | Global Standard deployment capacity |
-| `SOL_CAPACITY` | `10` | Global Standard deployment capacity |
-| `ROUTER_API_KEY` | generated | Bearer token for the public gateway |
-| `OLLAYA_TIMEOUT_MS` | `120000` | Allows a cold CPU model load; warm decisions return much sooner |
-| `OLLAYA_MODEL` | `coding-router` | Derived Ollaya model with baked questions |
-| `ROUTE_CACHE_TTL_MS` | `3600000` | Reuses one decision throughout an agent loop |
+| azd value | Default | Purpose |
+|---|---:|---|
+| `AZURE_LOCATION` | `southcentralus` | ACA, ACR, Storage, identity, and logging region |
+| `DEPLOYMENT_MODE` | `full` | `full` or `ollaya-only` |
+| `NANO_CAPACITY` | `100` | GPT-5.4 Nano Global Standard capacity |
+| `GPU_MIN_REPLICAS` | `1` | Warm T4 replicas; maximum is fixed at one |
+| `MODEL_READY_TIMEOUT_MINUTES` | `120` | Allows the first large model pull to complete |
+| `CLASSIFIER_API_KEY` | generated | Bearer token for public API endpoints |
 
-The Ollaya app uses the 2 vCPU/4 GiB consumption size. Laya's fp32 graph and ONNX Runtime exceed the 1 vCPU/2 GiB profile during model load.
-
-The gateway fails explicitly if Ollaya, managed identity, or an upstream model fails. It does not silently claim success or downgrade around errors.
+The Nano account is deployed in East US 2 because that is where version `2026-03-17` was available for this validation. Global Standard processing may occur outside the account region under Azure's deployment terms.
 
 ## Security
 
-- Azure OpenAI local key authentication is disabled.
-- The router uses a user-assigned managed identity with only `Cognitive Services OpenAI User`.
-- ACR admin credentials are disabled; both apps pull through managed identity.
-- Ollaya has internal-only ingress.
-- The public gateway requires a generated bearer token.
-- The bearer token and generated OpenCode config stay in the local `.azure` state and ignored files.
+- Ollaya has internal-only ACA ingress.
+- Public classification endpoints require a bearer token.
+- Azure OpenAI local authentication is disabled.
+- The API uses a user-assigned managed identity with `Cognitive Services OpenAI User`.
+- ACR admin credentials are disabled; Container Apps pulls images using managed identity.
+- Model data persists in a private Azure Files share.
+- Generated credentials and local config files are ignored by Git.
 
-For a production shared service, put Azure API Management or another identity-aware edge in front of the gateway and replace the static bearer token with organizational authentication.
+For a shared production endpoint, replace the static bearer token with organizational identity at Azure API Management or another identity-aware edge.
 
 ## Project structure
 
 ```text
 ollaya-on-aca/
 ├── app/
-│   ├── ollaya/              # Ollaya image, routing questions, startup
-│   └── router/              # Responses proxy, policy, metrics, tests
+│   ├── api/                 # Authenticated classification API and tests
+│   ├── ollaya/              # CUDA image, derived model, pull and warm-up
+│   └── taxonomy.json        # Shared 18-scenario / 60-intent taxonomy
 ├── benchmarks/
-│   ├── fixtures/            # Validated trivial, normal, and hard tasks
-│   └── tasks.json
-├── hooks/                   # azd setup, image builds, deploy, smoke tests
-├── infra/                   # ACA, ACR, identities, Azure OpenAI deployments
+│   └── results.json         # Published machine-readable comparison
+├── hooks/                   # azd quota checks, builds, deploy, readiness
+├── infra/                   # ACA T4 profile, Storage, identity, Nano
 ├── misc/images/
-├── scripts/benchmark.mjs
+├── scripts/
+│   ├── benchmark.mjs
+│   ├── lib/metrics.js
+│   └── test/metrics.test.js
 ├── azure.yaml
-└── opencode.example.json
+└── instruction-pivot.md
 ```
+
+## Validation
+
+```powershell
+npm test
+az bicep build --file .\infra\main.bicep
+```
+
+The deployment hooks also validate:
+
+- T4 profile and Nano quota before provisioning.
+- Immutable ACR image builds.
+- Exact new API revision health before accepting public readiness.
+- A real Winnow decision on `cuda:*` with nonzero VRAM.
+- Winnow and Nano smoke classifications in `full` mode.
+- Winnow success and Azure-disabled behavior in `ollaya-only` mode.
 
 ## Troubleshooting
 
-| Problem | Check |
+| Symptom | Check |
 |---|---|
-| Model deployment fails with quota | Run the quota commands above and lower or request capacity |
-| Router stays unhealthy | Inspect both app logs; Ollaya pulls Laya during first startup |
-| Azure OpenAI returns `403` | Confirm the router identity has `Cognitive Services OpenAI User` on both accounts |
-| OpenCode calls `/chat/completions` | Use `@ai-sdk/openai`; the router implements `/v1/responses` |
-| Benchmark has zero usage | Confirm Azure streamed a `response.completed` event and inspect router logs |
-| ACR image pull fails | Confirm the app identity has `AcrPull` and is configured as registry identity |
-
-Logs:
+| First deployment appears stuck | The initial 8 GB pull took 76 minutes in the measured environment; inspect Ollaya logs and Azure Files growth |
+| `PTX was compiled with an unsupported toolchain` | Use the pinned `cuda12` image rather than the default CUDA 13 tag |
+| `/readyz` returns `503` | Inspect Ollaya load/pull logs and confirm `/api/ps` reports `cuda:0` |
+| Nano returns `403` | Confirm the API identity has `Cognitive Services OpenAI User` on the Nano account |
+| Nano deployment fails | Check East US 2 Global Standard quota and `NANO_CAPACITY` |
+| ACR pull fails | Confirm the app identity has `AcrPull` and is configured as the registry identity |
+| Benchmark rate limits | Lower `--concurrency`; retries and failures remain visible in the report |
 
 ```powershell
 $rg = azd env get-value AZURE_RESOURCE_GROUP
 az containerapp logs show -g $rg -n (azd env get-value OLLAYA_APP_NAME) --follow
-az containerapp logs show -g $rg -n (azd env get-value ROUTER_APP_NAME) --follow
+az containerapp logs show -g $rg -n (azd env get-value CLASSIFIER_API_APP_NAME) --follow
 ```
 
-## Tear down
+## Remove an environment
 
 ```powershell
 azd down
 ```
 
-This removes the selected azd environment's resource group after confirmation.
+This targets only the currently selected azd environment and asks for confirmation before deleting its resource group.
 
 ## License
 

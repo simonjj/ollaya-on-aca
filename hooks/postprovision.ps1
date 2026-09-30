@@ -349,6 +349,18 @@ try {
             throw "The GPT-5.4 Nano smoke test did not return an intent."
         }
         $azureIntent = $azureResult.intent.label
+    } else {
+        $azureResponse = Invoke-WebRequest `
+            -Method Post `
+            -Uri "$classifierEndpoint/v1/classify/azure" `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $sampleBody `
+            -SkipHttpErrorCheck `
+            -TimeoutSec 180
+        if ([int]$azureResponse.StatusCode -ne 503) {
+            throw "The Azure endpoint returned $($azureResponse.StatusCode) in ollaya-only mode; expected 503."
+        }
     }
 
     $workloadProfile = az containerapp show `

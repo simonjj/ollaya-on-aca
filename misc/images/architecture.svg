@@ -1,53 +1,62 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1180" height="620" viewBox="0 0 1180 620" role="img" aria-labelledby="title desc">
-  <title id="title">Ollaya routing architecture on Azure Container Apps</title>
-  <desc id="desc">OpenCode sends requests to an Azure Container Apps router. The router asks Ollaya for a trivial, normal, or hard decision and forwards the request to GPT-5.6 Luna or Sol.</desc>
+  <title id="title">MASSIVE classification benchmark on Azure Container Apps</title>
+  <desc id="desc">A benchmark client calls an authenticated classifier API. The API sends equivalent classification requests to internal Ollaya with Winnow on a T4 GPU and to Azure OpenAI GPT-5.4 Nano. Ollaya uses a persistent Azure Files model cache.</desc>
   <defs>
     <style>
       .box { fill: #ffffff; stroke: #2563eb; stroke-width: 3; rx: 18; }
-      .decision { fill: #eff6ff; stroke: #0284c7; stroke-width: 3; rx: 18; }
-      .model { fill: #f0fdf4; stroke: #16a34a; stroke-width: 3; rx: 18; }
-      .label { font: 700 24px "Segoe UI", Arial, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .api { fill: #eff6ff; stroke: #0284c7; stroke-width: 3; rx: 18; }
+      .local { fill: #f0fdf4; stroke: #16a34a; stroke-width: 3; rx: 18; }
+      .hosted { fill: #faf5ff; stroke: #9333ea; stroke-width: 3; rx: 18; }
+      .store { fill: #fff7ed; stroke: #ea580c; stroke-width: 3; rx: 18; }
+      .label { font: 700 23px "Segoe UI", Arial, sans-serif; fill: #0f172a; text-anchor: middle; }
       .small { font: 400 17px "Segoe UI", Arial, sans-serif; fill: #334155; text-anchor: middle; }
-      .route { font: 700 18px "Segoe UI", Arial, sans-serif; fill: #0f172a; text-anchor: middle; }
+      .note { font: 600 16px "Segoe UI", Arial, sans-serif; fill: #334155; text-anchor: middle; }
       .line { stroke: #475569; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #ea580c; stroke-width: 3; stroke-dasharray: 9 7; fill: none; marker-end: url(#orangeArrow); }
     </style>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
     </marker>
+    <marker id="orangeArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#ea580c"/>
+    </marker>
   </defs>
 
   <rect width="1180" height="620" fill="#f8fafc"/>
-  <rect class="box" x="55" y="245" width="210" height="120"/>
-  <text class="label" x="160" y="295">OpenCode</text>
-  <text class="small" x="160" y="328">Responses API client</text>
 
-  <rect class="box" x="345" y="220" width="250" height="170"/>
-  <text class="label" x="470" y="270">Routing gateway</text>
-  <text class="small" x="470" y="305">Azure Container Apps</text>
-  <text class="small" x="470" y="335">Managed identity</text>
-  <text class="small" x="470" y="365">Usage metrics</text>
+  <rect class="box" x="45" y="235" width="230" height="145"/>
+  <text class="label" x="160" y="285">Benchmark CLI</text>
+  <text class="small" x="160" y="320">Amazon MASSIVE</text>
+  <text class="small" x="160" y="348">2,974 en-US tests</text>
 
-  <rect class="decision" x="680" y="60" width="250" height="130"/>
-  <text class="label" x="805" y="110">Ollaya + Laya</text>
-  <text class="small" x="805" y="143">Typed decision model</text>
-  <text class="small" x="805" y="169">trivial · normal · hard</text>
+  <rect class="api" x="355" y="210" width="285" height="195"/>
+  <text class="label" x="497" y="260">Classifier API</text>
+  <text class="small" x="497" y="295">ACA Consumption</text>
+  <text class="small" x="497" y="325">Bearer authentication</text>
+  <text class="small" x="497" y="355">Managed identity</text>
+  <text class="small" x="497" y="382">Strict shared taxonomy</text>
 
-  <rect class="model" x="955" y="245" width="190" height="110"/>
-  <text class="label" x="1050" y="290">GPT-5.6 Luna</text>
-  <text class="small" x="1050" y="323">trivial</text>
+  <rect class="local" x="755" y="70" width="350" height="175"/>
+  <text class="label" x="930" y="120">Ollaya + Winnow</text>
+  <text class="small" x="930" y="155">Internal ACA ingress</text>
+  <text class="small" x="930" y="183">NVIDIA T4 · cuda:0</text>
+  <text class="small" x="930" y="211">Probabilities + calibration</text>
 
-  <rect class="model" x="955" y="405" width="190" height="140"/>
-  <text class="label" x="1050" y="452">GPT-5.6 Sol</text>
-  <text class="small" x="1050" y="486">normal: medium</text>
-  <text class="small" x="1050" y="515">hard: high</text>
+  <rect class="hosted" x="755" y="345" width="350" height="155"/>
+  <text class="label" x="930" y="395">GPT-5.4 Nano</text>
+  <text class="small" x="930" y="430">Azure OpenAI · East US 2</text>
+  <text class="small" x="930" y="458">Strict JSON schema</text>
+  <text class="small" x="930" y="482">Reasoning effort: none</text>
 
-  <path class="line" d="M265 305 H345"/>
-  <path class="line" d="M595 260 C635 230 650 175 680 145"/>
-  <path class="line" d="M930 125 C1010 125 1050 175 1050 245"/>
-  <path class="line" d="M595 330 C755 330 795 300 955 300"/>
-  <path class="line" d="M595 360 C770 405 805 475 955 475"/>
+  <rect class="store" x="755" y="535" width="350" height="65"/>
+  <text class="note" x="930" y="575">Persistent Azure Files model cache</text>
 
-  <text class="route" x="725" y="295">trivial</text>
-  <text class="route" x="755" y="395">normal / hard</text>
-  <text class="small" x="495" y="425">Classification stays local to your ACA environment.</text>
+  <path class="line" d="M275 307 H355"/>
+  <path class="line" d="M640 265 C700 240 710 160 755 160"/>
+  <path class="line" d="M640 350 C700 370 710 423 755 423"/>
+  <path class="dash" d="M930 535 V245"/>
+
+  <text class="note" x="695" y="178">Winnow</text>
+  <text class="note" x="700" y="415">Nano</text>
+  <text class="small" x="495" y="445">Same record IDs, labels, and descriptions</text>
 </svg>

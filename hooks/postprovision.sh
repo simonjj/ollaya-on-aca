@@ -358,6 +358,16 @@ if [[ "$deployment_mode" == "full" ]]; then
     -d "$sample_body" \
     "$classifier_endpoint/v1/classify/azure")"
   azure_intent="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["intent"]["label"])' <<<"$azure_result")"
+else
+  azure_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 180 \
+    -H "Authorization: ******" \
+    -H "Content-Type: application/json" \
+    -d "$sample_body" \
+    "$classifier_endpoint/v1/classify/azure")"
+  if [[ "$azure_status" != "503" ]]; then
+    echo "The Azure endpoint returned $azure_status in ollaya-only mode; expected 503." >&2
+    exit 1
+  fi
 fi
 
 workload_profile="$(az containerapp show \
