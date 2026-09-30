@@ -2,7 +2,7 @@
   <img src="misc/images/architecture.svg" alt="MASSIVE intent classification with Ollaya Winnow and Azure OpenAI on Azure Container Apps" width="1000">
 </p>
 
-# Ollaya Devision Model on Azure Container Apps
+# Ollaya Decision Model on Azure Container Apps
 
 ## Overview
 
