@@ -2,17 +2,67 @@
   <img src="misc/images/architecture.svg" alt="MASSIVE intent classification with Ollaya Winnow and Azure OpenAI on Azure Container Apps" width="1000">
 </p>
 
-# Benchmark Winnow against GPT-5.4 Nano on Azure Container Apps
+# Ollaya Devision Model on Azure Container Apps
 
-Deploy an authenticated intent-classification API and compare:
+## Overview
 
-- **Ollaya `winnow:e4b`** on an Azure Container Apps serverless NVIDIA T4 GPU.
-- **Azure OpenAI GPT-5.4 Nano** with strict structured output and managed identity.
-- **Amazon MASSIVE 1.1**, using all 2,974 records in the `en-US` test split.
+A decision model selects from a predefined set of choices and returns a score or probability for each option. Unlike a traditional LLM, which generates open-ended text token by token, a decision model is designed for bounded tasks such as intent classification, routing, prioritization, and policy selection. This narrower output can provide lower and more predictable latency, explicit confidence scores, and simpler validation.
 
-The sample reports intent accuracy, macro-F1, scenario accuracy, calibration, latency, throughput, failures, token usage, and estimated inference cost. It also supports an `ollaya-only` deployment that creates no Azure OpenAI resources.
+This sample deploys **Ollaya `winnow:e4b`** on an Azure Container Apps serverless NVIDIA T4 GPU. It can be deployed by itself as an authenticated classification endpoint or benchmarked against **Azure OpenAI GPT-5.4 Nano** using all 2,974 records in the Amazon MASSIVE 1.1 `en-US` test split.
 
 The original OpenCode routing sample is preserved in the immutable [`ollaya+opencode`](https://github.com/simonjj/ollaya-on-aca/tree/ollaya%2Bopencode) tag.
+
+## Quickstart
+
+The commands below use PowerShell and assume the Azure CLI and Azure Developer CLI are already authenticated.
+
+### Deploy Ollaya only
+
+```powershell
+git clone https://github.com/simonjj/ollaya-on-aca.git
+cd ollaya-on-aca
+
+azd env new ollaya-only
+azd env set AZURE_RESOURCE_GROUP ollaya-only
+azd env set AZURE_LOCATION southcentralus
+azd env set DEPLOYMENT_MODE ollaya-only
+azd up
+```
+
+This deploys Winnow on a T4 GPU, its persistent model cache, and the authenticated classifier API without creating Azure OpenAI resources.
+
+### Deploy and run the benchmark
+
+```powershell
+azd env new ollaya-benchmark
+azd env set AZURE_RESOURCE_GROUP ollaya-benchmark
+azd env set AZURE_LOCATION southcentralus
+azd env set DEPLOYMENT_MODE full
+azd env set NANO_CAPACITY 100
+azd up
+
+npm ci
+$env:CLASSIFIER_ENDPOINT = azd env get-value CLASSIFIER_ENDPOINT
+$env:CLASSIFIER_API_KEY = azd env get-value CLASSIFIER_API_KEY
+
+# Fast deployment validation.
+npm run benchmark -- `
+  --profile smoke `
+  --provider both `
+  --mode both `
+  --concurrency 8 `
+  --output .\benchmark-work\smoke.json
+
+# Complete 2,974-record comparison.
+npm run benchmark -- `
+  --profile standard `
+  --provider both `
+  --mode both `
+  --concurrency 8 `
+  --output .\benchmarks\results.json
+```
+
+The full mode deploys the same Winnow endpoint plus GPT-5.4 Nano and reports accuracy, macro-F1, calibration, latency, throughput, failures, token usage, and estimated inference cost.
 
 ## Why GPT-5.4 Nano?
 
