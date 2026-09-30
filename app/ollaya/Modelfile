@@ -1,4 +1,3 @@
-FROM laya:en
-QUESTIONS ./questions.json
-PARAMETER precision fp32
-DESCRIPTION Routes coding-agent requests to trivial, normal, or hard model tiers
+FROM winnow:e4b
+QUESTIONS /home/ollaya/taxonomy.json
+DESCRIPTION Classifies Amazon MASSIVE scenarios and intents

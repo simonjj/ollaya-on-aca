@@ -3,6 +3,8 @@ set -euo pipefail
 
 export OLLAYA_HOST="${OLLAYA_HOST:-0.0.0.0:11435}"
 export OLLAYA_KEEP_ALIVE="${OLLAYA_KEEP_ALIVE:--1}"
+base_model="${OLLAYA_BASE_MODEL:-winnow:e4b}"
+model="${OLLAYA_MODEL:-massive-classifier}"
 
 ollaya serve &
 server_pid=$!
@@ -25,7 +27,13 @@ if ! ollaya list >/dev/null 2>&1; then
   exit 1
 fi
 
-ollaya pull "${OLLAYA_BASE_MODEL:-laya:en}"
-ollaya create "${OLLAYA_ROUTER_MODEL:-coding-router}" -f /home/ollaya/Modelfile
+echo "Ensuring ${base_model} is present in the Ollaya model cache..."
+ollaya pull "$base_model"
+ollaya create "$model" -f /home/ollaya/Modelfile
+
+echo "Warming ${model} before reporting readiness..."
+ollaya run --format json --keepalive -1 "$model" \
+  "set an alarm for seven tomorrow morning" >/tmp/ollaya-warmup.json
+touch /tmp/ollaya-ready
 
 wait "$server_pid"

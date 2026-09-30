@@ -8,14 +8,11 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
-    "lunaCapacity": {
-      "value": "${LUNA_CAPACITY}"
+    "deploymentMode": {
+      "value": "${DEPLOYMENT_MODE}"
     },
-    "terraCapacity": {
-      "value": "${TERRA_CAPACITY}"
-    },
-    "solCapacity": {
-      "value": "${SOL_CAPACITY}"
+    "nanoCapacity": {
+      "value": "${NANO_CAPACITY}"
     }
   }
 }

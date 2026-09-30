@@ -1,0 +1,16 @@
+{
+  "name": "ollaya-on-aca",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "benchmark": "node scripts/benchmark.mjs",
+    "test": "npm test --prefix app/api && node --test scripts/test/metrics.test.js"
+  },
+  "dependencies": {
+    "tar": "^7.5.22"
+  }
+}

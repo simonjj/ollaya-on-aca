@@ -9,28 +9,31 @@ param environmentName string
 @description('Short deterministic suffix for globally unique resources')
 param resourceToken string
 
-@description('Global Standard capacity for GPT-5.6 Luna')
-param lunaCapacity int
+@allowed([
+  'full'
+  'ollaya-only'
+])
+@description('Resources to deploy')
+param deploymentMode string
 
-@description('Global Standard capacity for GPT-5.6 Terra')
-param terraCapacity int
+@description('Global Standard capacity for GPT-5.4 Nano')
+param nanoCapacity int
 
-@description('Global Standard capacity for GPT-5.6 Sol')
-param solCapacity int
-
+var deployAzure = deploymentMode == 'full'
 var baseName = toLower('${environmentName}-${resourceToken}')
 var compactName = replace(baseName, '-', '')
 var containerAppsEnvironmentName = 'cae-${baseName}'
 var logAnalyticsWorkspaceName = 'log-${baseName}'
 var acrName = take('acrollaya${compactName}', 50)
+var storageAccountName = take('stollaya${compactName}', 24)
 var identityName = 'id-${baseName}'
-var lunaAccountName = take('oai-luna-${baseName}', 64)
-var solAccountName = take('oai-sol-${baseName}', 64)
-var lunaDeploymentName = 'gpt-5.6-luna'
-var terraDeploymentName = 'gpt-5.6-terra'
-var solDeploymentName = 'gpt-5.6-sol'
+var nanoAccountName = take('oai-nano-${baseName}', 64)
+var nanoDeploymentName = 'gpt-5.4-nano'
 var ollayaAppName = 'ollaya-${baseName}'
-var routerAppName = 'router-${baseName}'
+var apiAppName = 'classifier-${baseName}'
+var modelStorageName = 'ollaya-models'
+var modelShareName = 'ollaya-models'
+var gpuWorkloadProfileName = 'gpu-t4'
 
 var acrPullRoleId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -54,7 +57,7 @@ resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09
   }
 }
 
-resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01' = {
+resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2025-07-01' = {
   name: containerAppsEnvironmentName
   location: location
   properties: {
@@ -69,6 +72,10 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
       {
         name: 'Consumption'
         workloadProfileType: 'Consumption'
+      }
+      {
+        name: gpuWorkloadProfileName
+        workloadProfileType: 'Consumption-GPU-NC8as-T4'
       }
     ]
   }
@@ -87,6 +94,48 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2023-11-01-pr
   }
 }
 
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: storageAccountName
+  location: location
+  sku: {
+    name: 'Standard_LRS'
+  }
+  kind: 'StorageV2'
+  properties: {
+    allowBlobPublicAccess: false
+    allowSharedKeyAccess: true
+    minimumTlsVersion: 'TLS1_2'
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource modelShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
+  parent: fileService
+  name: modelShareName
+  properties: {
+    accessTier: 'TransactionOptimized'
+    shareQuota: 64
+  }
+}
+
+resource modelStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
+  parent: containerAppsEnvironment
+  name: modelStorageName
+  properties: {
+    azureFile: {
+      accountName: storageAccount.name
+      accountKey: storageAccount.listKeys().keys[0].value
+      shareName: modelShare.name
+      accessMode: 'ReadWrite'
+    }
+  }
+}
+
 resource appIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: identityName
   location: location
@@ -102,8 +151,8 @@ resource acrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-resource lunaAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
-  name: lunaAccountName
+resource nanoAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = if (deployAzure) {
+  name: nanoAccountName
   location: 'eastus2'
   kind: 'OpenAI'
   sku: {
@@ -113,7 +162,7 @@ resource lunaAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
     type: 'None'
   }
   properties: {
-    customSubDomainName: lunaAccountName
+    customSubDomainName: nanoAccountName
     disableLocalAuth: true
     publicNetworkAccess: 'Enabled'
     networkAcls: {
@@ -122,93 +171,26 @@ resource lunaAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
   }
 }
 
-resource lunaDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
-  parent: lunaAccount
-  name: lunaDeploymentName
+resource nanoDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = if (deployAzure) {
+  parent: nanoAccount
+  name: nanoDeploymentName
   sku: {
     name: 'GlobalStandard'
-    capacity: lunaCapacity
+    capacity: nanoCapacity
   }
   properties: {
     model: {
       format: 'OpenAI'
-      name: 'gpt-5.6-luna'
-      version: '2026-07-09'
+      name: 'gpt-5.4-nano'
+      version: '2026-03-17'
     }
     versionUpgradeOption: 'OnceCurrentVersionExpired'
   }
 }
 
-resource solAccount 'Microsoft.CognitiveServices/accounts@2025-06-01' = {
-  name: solAccountName
-  location: 'westus'
-  kind: 'OpenAI'
-  sku: {
-    name: 'S0'
-  }
-  identity: {
-    type: 'None'
-  }
-  properties: {
-    customSubDomainName: solAccountName
-    disableLocalAuth: true
-    publicNetworkAccess: 'Enabled'
-    networkAcls: {
-      defaultAction: 'Allow'
-    }
-  }
-}
-
-resource solDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
-  parent: solAccount
-  name: solDeploymentName
-  sku: {
-    name: 'GlobalStandard'
-    capacity: solCapacity
-  }
-  properties: {
-    model: {
-      format: 'OpenAI'
-      name: 'gpt-5.6-sol'
-      version: '2026-07-09'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-resource terraDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
-  parent: solAccount
-  name: terraDeploymentName
-  dependsOn: [
-    solDeployment
-  ]
-  sku: {
-    name: 'GlobalStandard'
-    capacity: terraCapacity
-  }
-  properties: {
-    model: {
-      format: 'OpenAI'
-      name: 'gpt-5.6-terra'
-      version: '2026-07-09'
-    }
-    versionUpgradeOption: 'OnceCurrentVersionExpired'
-  }
-}
-
-resource lunaInferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: lunaAccount
-  name: guid(lunaAccount.id, appIdentity.id, cognitiveServicesOpenAIUserRoleId)
-  properties: {
-    principalId: appIdentity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: cognitiveServicesOpenAIUserRoleId
-  }
-}
-
-resource solInferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  scope: solAccount
-  name: guid(solAccount.id, appIdentity.id, cognitiveServicesOpenAIUserRoleId)
+resource nanoInferenceRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployAzure) {
+  scope: nanoAccount
+  name: guid(nanoAccount.id, appIdentity.id, cognitiveServicesOpenAIUserRoleId)
   properties: {
     principalId: appIdentity.properties.principalId
     principalType: 'ServicePrincipal'
@@ -223,10 +205,8 @@ output AZURE_CONTAINER_APPS_ENVIRONMENT_NAME string = containerAppsEnvironment.n
 output APP_IDENTITY_ID string = appIdentity.id
 output APP_IDENTITY_CLIENT_ID string = appIdentity.properties.clientId
 output OLLAYA_APP_NAME string = ollayaAppName
-output ROUTER_APP_NAME string = routerAppName
-output LUNA_ENDPOINT string = lunaAccount.properties.endpoint
-output LUNA_DEPLOYMENT string = lunaDeployment.name
-output TERRA_ENDPOINT string = solAccount.properties.endpoint
-output TERRA_DEPLOYMENT string = terraDeployment.name
-output SOL_ENDPOINT string = solAccount.properties.endpoint
-output SOL_DEPLOYMENT string = solDeployment.name
+output CLASSIFIER_API_APP_NAME string = apiAppName
+output MODEL_STORAGE_NAME string = modelStorage.name
+output GPU_WORKLOAD_PROFILE_NAME string = gpuWorkloadProfileName
+output NANO_ENDPOINT string = deployAzure ? nanoAccount!.properties.endpoint : ''
+output NANO_DEPLOYMENT string = deployAzure ? nanoDeployment!.name : ''

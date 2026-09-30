@@ -2,19 +2,17 @@
 
 name: ollaya-on-aca
 metadata:
-  template: ollaya-on-aca@0.1.0
+  template: ollaya-on-aca@0.2.0
 
 infra:
   provider: bicep
   path: infra
   module: main
   parameters:
-    lunaCapacity:
-      value: ${LUNA_CAPACITY}
-    terraCapacity:
-      value: ${TERRA_CAPACITY}
-    solCapacity:
-      value: ${SOL_CAPACITY}
+    deploymentMode:
+      value: ${DEPLOYMENT_MODE}
+    nanoCapacity:
+      value: ${NANO_CAPACITY}
 
 hooks:
   preprovision:

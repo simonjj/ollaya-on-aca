@@ -1,7 +1,9 @@
 .azure/
+.cache/
 .env
-node_modules/
-opencode.local.json
 benchmark-work/
+node_modules/
+classifier.local.json
+opencode.local.json
 instructions.md
 *.log

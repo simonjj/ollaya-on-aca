@@ -13,219 +13,377 @@ function Test-ContainerApp([string]$Name, [string]$ResourceGroup) {
     $nativeErrorPreference = $PSNativeCommandUseErrorActionPreference
     $PSNativeCommandUseErrorActionPreference = $false
     try {
-        $state = az containerapp show --name $Name --resource-group $ResourceGroup --query properties.provisioningState -o tsv --only-show-errors 2>$null
-        $succeeded = $LASTEXITCODE -eq 0 -and $state -eq "Succeeded"
+        az containerapp show --name $Name --resource-group $ResourceGroup --only-show-errors 1>$null 2>$null
+        return $LASTEXITCODE -eq 0
     } finally {
         $PSNativeCommandUseErrorActionPreference = $nativeErrorPreference
     }
-    return $succeeded
 }
 
-function Wait-Endpoint([string]$Uri, [hashtable]$Headers = @{}) {
-    for ($attempt = 1; $attempt -le 60; $attempt++) {
-        try {
-            $response = Invoke-WebRequest -Uri $Uri -Headers $Headers -TimeoutSec 10 -UseBasicParsing
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-                return
-            }
-        } catch {
-            if ($attempt -eq 60) { throw }
-        }
-        Start-Sleep -Seconds 5
+function Deploy-ContainerApp(
+    [string]$Name,
+    [string]$ResourceGroup,
+    [string]$ConfigurationPath
+) {
+    if (Test-ContainerApp $Name $ResourceGroup) {
+        az containerapp update `
+            --name $Name `
+            --resource-group $ResourceGroup `
+            --yaml $ConfigurationPath `
+            --only-show-errors 1>$null
+    } else {
+        az containerapp create `
+            --name $Name `
+            --resource-group $ResourceGroup `
+            --yaml $ConfigurationPath `
+            --only-show-errors 1>$null
     }
-    throw "Endpoint did not become ready: $Uri"
+}
+
+function Wait-Ready([string]$Uri, [int]$TimeoutMinutes) {
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $attempt = 0
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        try {
+            $response = Invoke-RestMethod -Uri $Uri -TimeoutSec 30
+            if (
+                $response.status -eq "ready" -and
+                $response.device -like "cuda:*" -and
+                [long]$response.sizeVramBytes -gt 0
+            ) {
+                return $response
+            }
+        } catch {}
+        if ($attempt % 12 -eq 0) {
+            Write-Host "Still waiting for Winnow readiness ($attempt attempts)..."
+        }
+        Start-Sleep -Seconds 10
+    }
+    throw "Endpoint did not report CUDA readiness within $TimeoutMinutes minutes: $Uri"
+}
+
+function Wait-RevisionHealthy(
+    [string]$Name,
+    [string]$ResourceGroup,
+    [string]$Revision,
+    [int]$TimeoutMinutes
+) {
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    while ((Get-Date) -lt $deadline) {
+        $state = az containerapp revision show `
+            --name $Name `
+            --resource-group $ResourceGroup `
+            --revision $Revision `
+            --query "{health:properties.healthState,running:properties.runningState}" `
+            -o json `
+            --only-show-errors | ConvertFrom-Json
+        if ($state.health -eq "Healthy" -and $state.running -eq "RunningAtMaxScale") {
+            return
+        }
+        Start-Sleep -Seconds 10
+    }
+    throw "Revision $Revision did not become healthy within $TimeoutMinutes minutes."
 }
 
 $resourceGroup = Get-AzdValue "AZURE_RESOURCE_GROUP"
-$environmentName = Get-AzdValue "AZURE_CONTAINER_APPS_ENVIRONMENT_NAME"
+$location = Get-AzdValue "AZURE_LOCATION"
+$deploymentMode = Get-AzdValue "DEPLOYMENT_MODE"
+$environmentId = Get-AzdValue "AZURE_CONTAINER_APPS_ENVIRONMENT_ID"
 $acrName = Get-AzdValue "ACR_NAME"
 $acrLoginServer = Get-AzdValue "ACR_LOGIN_SERVER"
 $identityId = Get-AzdValue "APP_IDENTITY_ID"
 $identityClientId = Get-AzdValue "APP_IDENTITY_CLIENT_ID"
 $ollayaAppName = Get-AzdValue "OLLAYA_APP_NAME"
-$routerAppName = Get-AzdValue "ROUTER_APP_NAME"
-$routerApiKey = Get-AzdValue "ROUTER_API_KEY"
-$lunaEndpoint = Get-AzdValue "LUNA_ENDPOINT"
-$lunaDeployment = Get-AzdValue "LUNA_DEPLOYMENT"
-$terraEndpoint = Get-AzdValue "TERRA_ENDPOINT"
-$terraDeployment = Get-AzdValue "TERRA_DEPLOYMENT"
-$solEndpoint = Get-AzdValue "SOL_ENDPOINT"
-$solDeployment = Get-AzdValue "SOL_DEPLOYMENT"
+$apiAppName = Get-AzdValue "CLASSIFIER_API_APP_NAME"
+$modelStorageName = Get-AzdValue "MODEL_STORAGE_NAME"
+$gpuWorkloadProfileName = Get-AzdValue "GPU_WORKLOAD_PROFILE_NAME"
+$classifierApiKey = Get-AzdValue "CLASSIFIER_API_KEY"
+$gpuMinReplicas = [int](Get-AzdValue "GPU_MIN_REPLICAS")
+$modelReadyTimeoutMinutes = [int](Get-AzdValue "MODEL_READY_TIMEOUT_MINUTES")
+$nanoEndpoint = ""
+$nanoDeployment = ""
+if ($deploymentMode -eq "full") {
+    $nanoEndpoint = Get-AzdValue "NANO_ENDPOINT"
+    $nanoDeployment = Get-AzdValue "NANO_DEPLOYMENT"
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $imagePrefix = "ollaya-on-aca"
 $imageTag = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ollaya-on-aca-$imageTag"
+New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
-Write-Host "Building the Ollaya and routing gateway images in Azure Container Registry..."
-az acr build --registry $acrName --image "$imagePrefix/ollaya:$imageTag" --file "$repoRoot\app\ollaya\Dockerfile" "$repoRoot\app\ollaya" --only-show-errors
-az acr build --registry $acrName --image "$imagePrefix/router:$imageTag" --file "$repoRoot\app\router\Dockerfile" "$repoRoot\app\router" --only-show-errors
+try {
+    Write-Host "Building immutable Ollaya and classifier API images..."
+    az acr build `
+        --registry $acrName `
+        --image "$imagePrefix/ollaya:$imageTag" `
+        --file "$repoRoot\app\ollaya\Dockerfile" `
+        $repoRoot `
+        --only-show-errors
+    az acr build `
+        --registry $acrName `
+        --image "$imagePrefix/api:$imageTag" `
+        --file "$repoRoot\app\api\Dockerfile" `
+        $repoRoot `
+        --only-show-errors
 
-$ollayaImage = "$acrLoginServer/$imagePrefix/ollaya:$imageTag"
-$routerImage = "$acrLoginServer/$imagePrefix/router:$imageTag"
+    $ollayaImage = "$acrLoginServer/$imagePrefix/ollaya:$imageTag"
+    $apiImage = "$acrLoginServer/$imagePrefix/api:$imageTag"
+    $userAssignedIdentities = @{}
+    $userAssignedIdentities[$identityId] = @{}
 
-if (-not (Test-ContainerApp $ollayaAppName $resourceGroup)) {
-    az containerapp create `
-        --name $ollayaAppName `
-        --resource-group $resourceGroup `
-        --environment $environmentName `
-        --image $ollayaImage `
-        --ingress internal `
-        --target-port 11435 `
-        --transport auto `
-        --user-assigned $identityId `
-        --registry-server $acrLoginServer `
-        --registry-identity $identityId `
-        --cpu 2.0 `
-        --memory 4Gi `
-        --min-replicas 1 `
-        --max-replicas 1 `
-        --env-vars OLLAYA_KEEP_ALIVE=-1 OLLAYA_ROUTER_MODEL=coding-router `
-        --only-show-errors 1>$null
-} else {
-    az containerapp identity assign --name $ollayaAppName --resource-group $resourceGroup --user-assigned $identityId --only-show-errors 1>$null
-    az containerapp registry set --name $ollayaAppName --resource-group $resourceGroup --server $acrLoginServer --identity $identityId --only-show-errors 1>$null
-    az containerapp update `
-        --name $ollayaAppName `
-        --resource-group $resourceGroup `
-        --image $ollayaImage `
-        --cpu 2.0 `
-        --memory 4Gi `
-        --min-replicas 1 `
-        --max-replicas 1 `
-        --set-env-vars OLLAYA_KEEP_ALIVE=-1 OLLAYA_ROUTER_MODEL=coding-router `
-        --only-show-errors 1>$null
-    az containerapp ingress enable --name $ollayaAppName --resource-group $resourceGroup --type internal --target-port 11435 --transport auto --only-show-errors 1>$null
-}
-
-$ollayaFqdn = az containerapp show --name $ollayaAppName --resource-group $resourceGroup --query properties.configuration.ingress.fqdn -o tsv
-if (-not $ollayaFqdn) { throw "The Ollaya app has no internal FQDN." }
-
-if (-not (Test-ContainerApp $routerAppName $resourceGroup)) {
-    az containerapp create `
-        --name $routerAppName `
-        --resource-group $resourceGroup `
-        --environment $environmentName `
-        --image $routerImage `
-        --ingress external `
-        --target-port 8080 `
-        --transport auto `
-        --user-assigned $identityId `
-        --registry-server $acrLoginServer `
-        --registry-identity $identityId `
-        --cpu 0.5 `
-        --memory 1Gi `
-        --min-replicas 1 `
-        --max-replicas 1 `
-        --secrets router-api-key="$routerApiKey" `
-        --env-vars `
-            ROUTER_API_KEY=secretref:router-api-key `
-            OLLAYA_URL="https://$ollayaFqdn" `
-            OLLAYA_MODEL=coding-router `
-            OLLAYA_TIMEOUT_MS=120000 `
-            AZURE_CLIENT_ID=$identityClientId `
-            AZURE_LUNA_ENDPOINT=$lunaEndpoint `
-            AZURE_LUNA_DEPLOYMENT=$lunaDeployment `
-            AZURE_TERRA_ENDPOINT=$terraEndpoint `
-            AZURE_TERRA_DEPLOYMENT=$terraDeployment `
-            AZURE_SOL_ENDPOINT=$solEndpoint `
-            AZURE_SOL_DEPLOYMENT=$solDeployment `
-        --only-show-errors 1>$null
-} else {
-    az containerapp identity assign --name $routerAppName --resource-group $resourceGroup --user-assigned $identityId --only-show-errors 1>$null
-    az containerapp registry set --name $routerAppName --resource-group $resourceGroup --server $acrLoginServer --identity $identityId --only-show-errors 1>$null
-    az containerapp secret set --name $routerAppName --resource-group $resourceGroup --secrets router-api-key="$routerApiKey" --only-show-errors 1>$null
-    az containerapp update `
-        --name $routerAppName `
-        --resource-group $resourceGroup `
-        --image $routerImage `
-        --cpu 0.5 `
-        --memory 1Gi `
-        --min-replicas 1 `
-        --max-replicas 1 `
-        --set-env-vars `
-            ROUTER_API_KEY=secretref:router-api-key `
-            OLLAYA_URL="https://$ollayaFqdn" `
-            OLLAYA_MODEL=coding-router `
-            OLLAYA_TIMEOUT_MS=120000 `
-            AZURE_CLIENT_ID=$identityClientId `
-            AZURE_LUNA_ENDPOINT=$lunaEndpoint `
-            AZURE_LUNA_DEPLOYMENT=$lunaDeployment `
-            AZURE_TERRA_ENDPOINT=$terraEndpoint `
-            AZURE_TERRA_DEPLOYMENT=$terraDeployment `
-            AZURE_SOL_ENDPOINT=$solEndpoint `
-            AZURE_SOL_DEPLOYMENT=$solDeployment `
-        --only-show-errors 1>$null
-    az containerapp ingress enable --name $routerAppName --resource-group $resourceGroup --type external --target-port 8080 --transport auto --only-show-errors 1>$null
-}
-
-$routerFqdn = az containerapp show --name $routerAppName --resource-group $resourceGroup --query properties.configuration.ingress.fqdn -o tsv
-if (-not $routerFqdn) { throw "The router app has no external FQDN." }
-$routerEndpoint = "https://$routerFqdn"
-$headers = @{ Authorization = "Bearer $routerApiKey" }
-
-Write-Host "Waiting for Ollaya to pull Laya and create the coding router..."
-Wait-Endpoint "$routerEndpoint/healthz"
-
-$routeBody = @{ input = "Rename the local variable x to count in one function." } | ConvertTo-Json
-$routeResult = Invoke-RestMethod -Method Post -Uri "$routerEndpoint/route" -Headers $headers -ContentType "application/json" -Body $routeBody
-if (-not $routeResult.route) { throw "The route smoke test did not return a route." }
-
-$generationBody = @{
-    model = "ollaya-auto"
-    input = "Reply with exactly the word ready."
-    max_output_tokens = 32
-    stream = $false
-} | ConvertTo-Json -Depth 5
-
-$generationResult = $null
-for ($attempt = 1; $attempt -le 30; $attempt++) {
-    try {
-        $generationResult = Invoke-RestMethod -Method Post -Uri "$routerEndpoint/v1/responses" -Headers $headers -ContentType "application/json" -Body $generationBody -TimeoutSec 120
-        break
-    } catch {
-        if ($attempt -eq 30) { throw }
-        Start-Sleep -Seconds 10
-    }
-}
-if (-not $generationResult.id) { throw "The Azure OpenAI smoke test did not return a response id." }
-
-azd env set ROUTER_ENDPOINT $routerEndpoint | Out-Null
-
-$config = @"
-{
-  "`$schema": "https://opencode.ai/config.json",
-  "model": "ollaya-aca/ollaya-auto",
-  "provider": {
-    "ollaya-aca": {
-      "npm": "@ai-sdk/openai",
-      "name": "Ollaya router on Azure Container Apps",
-      "options": {
-        "baseURL": "$routerEndpoint/v1",
-        "apiKey": "$routerApiKey"
-      },
-      "models": {
-        "ollaya-auto": {
-          "name": "Ollaya automatic routing",
-          "limit": {
-            "context": 922000,
-            "output": 128000
-          }
-        },
-        "ollaya-baseline": {
-          "name": "GPT-5.6 Sol high reasoning baseline",
-          "limit": {
-            "context": 922000,
-            "output": 128000
-          }
+    $ollayaConfiguration = @{
+        location = $location
+        identity = @{
+            type = "UserAssigned"
+            userAssignedIdentities = $userAssignedIdentities
         }
-      }
+        properties = @{
+            environmentId = $environmentId
+            workloadProfileName = $gpuWorkloadProfileName
+            configuration = @{
+                activeRevisionsMode = "Single"
+                ingress = @{
+                    external = $false
+                    targetPort = 11435
+                    transport = "Auto"
+                    allowInsecure = $false
+                    traffic = @(
+                        @{
+                            latestRevision = $true
+                            weight = 100
+                        }
+                    )
+                }
+                registries = @(
+                    @{
+                        server = $acrLoginServer
+                        identity = $identityId
+                    }
+                )
+            }
+            template = @{
+                containers = @(
+                    @{
+                        name = "ollaya"
+                        image = $ollayaImage
+                        env = @(
+                            @{ name = "OLLAYA_BASE_MODEL"; value = "winnow:e4b" }
+                            @{ name = "OLLAYA_MODEL"; value = "massive-classifier" }
+                            @{ name = "OLLAYA_KEEP_ALIVE"; value = "-1" }
+                            @{ name = "OLLAYA_DEVICE"; value = "cuda" }
+                        )
+                        resources = @{
+                            cpu = 8.0
+                            memory = "56Gi"
+                        }
+                        volumeMounts = @(
+                            @{
+                                volumeName = "ollaya-models"
+                                mountPath = "/home/ollaya/.ollaya/models"
+                            }
+                        )
+                    }
+                )
+                scale = @{
+                    minReplicas = $gpuMinReplicas
+                    maxReplicas = 1
+                }
+                volumes = @(
+                    @{
+                        name = "ollaya-models"
+                        storageType = "AzureFile"
+                        storageName = $modelStorageName
+                    }
+                )
+            }
+        }
     }
-  }
-}
-"@
-$config | Set-Content -Path "$repoRoot\opencode.local.json" -Encoding UTF8
+    $ollayaConfigPath = Join-Path $tempRoot "ollaya.json"
+    $ollayaConfiguration | ConvertTo-Json -Depth 30 | Set-Content $ollayaConfigPath -Encoding utf8NoBOM
+    Deploy-ContainerApp $ollayaAppName $resourceGroup $ollayaConfigPath
 
-Write-Host ""
-Write-Host "Deployment complete."
-Write-Host "Router endpoint: $routerEndpoint"
-Write-Host "Ollaya smoke-test route: $($routeResult.route)"
-Write-Host "OpenCode config: opencode.local.json"
+    $ollayaFqdn = az containerapp show `
+        --name $ollayaAppName `
+        --resource-group $resourceGroup `
+        --query properties.configuration.ingress.fqdn `
+        -o tsv `
+        --only-show-errors
+    if (-not $ollayaFqdn) { throw "The Ollaya app has no internal FQDN." }
+
+    $apiSecrets = @(
+        @{
+            name = "classifier-api-key"
+            value = $classifierApiKey
+        }
+    )
+    $apiEnvironment = @(
+        @{ name = "CLASSIFIER_API_KEY"; secretRef = "classifier-api-key" }
+        @{ name = "OLLAYA_URL"; value = "https://$ollayaFqdn" }
+        @{ name = "OLLAYA_MODEL"; value = "massive-classifier" }
+        @{ name = "OLLAYA_TIMEOUT_MS"; value = "600000" }
+        @{ name = "OLLAYA_REQUIRED_DEVICE"; value = "cuda" }
+        @{ name = "ENABLE_AZURE"; value = ($deploymentMode -eq "full").ToString().ToLowerInvariant() }
+        @{ name = "AZURE_CLIENT_ID"; value = $identityClientId }
+        @{ name = "AZURE_OPENAI_ENDPOINT"; value = $nanoEndpoint }
+        @{ name = "AZURE_OPENAI_DEPLOYMENT"; value = $nanoDeployment }
+        @{ name = "AZURE_REASONING_EFFORT"; value = "none" }
+        @{ name = "AZURE_TIMEOUT_MS"; value = "180000" }
+    )
+    $apiConfiguration = @{
+        location = $location
+        identity = @{
+            type = "UserAssigned"
+            userAssignedIdentities = $userAssignedIdentities
+        }
+        properties = @{
+            environmentId = $environmentId
+            workloadProfileName = "Consumption"
+            configuration = @{
+                activeRevisionsMode = "Single"
+                ingress = @{
+                    external = $true
+                    targetPort = 8080
+                    transport = "Auto"
+                    allowInsecure = $false
+                    traffic = @(
+                        @{
+                            latestRevision = $true
+                            weight = 100
+                        }
+                    )
+                }
+                registries = @(
+                    @{
+                        server = $acrLoginServer
+                        identity = $identityId
+                    }
+                )
+                secrets = $apiSecrets
+            }
+            template = @{
+                containers = @(
+                    @{
+                        name = "classifier-api"
+                        image = $apiImage
+                        env = $apiEnvironment
+                        resources = @{
+                            cpu = 0.5
+                            memory = "1Gi"
+                        }
+                        probes = @(
+                            @{
+                                type = "Startup"
+                                httpGet = @{ path = "/healthz"; port = 8080 }
+                                initialDelaySeconds = 1
+                                periodSeconds = 5
+                                timeoutSeconds = 3
+                                failureThreshold = 60
+                            }
+                            @{
+                                type = "Readiness"
+                                httpGet = @{ path = "/readyz"; port = 8080 }
+                                initialDelaySeconds = 1
+                                periodSeconds = 10
+                                timeoutSeconds = 30
+                                failureThreshold = 3
+                            }
+                        )
+                    }
+                )
+                scale = @{
+                    minReplicas = 1
+                    maxReplicas = 1
+                }
+            }
+        }
+    }
+    $apiConfigPath = Join-Path $tempRoot "api.json"
+    $apiConfiguration | ConvertTo-Json -Depth 30 | Set-Content $apiConfigPath -Encoding utf8NoBOM
+    Deploy-ContainerApp $apiAppName $resourceGroup $apiConfigPath
+    $apiRevision = az containerapp show `
+        --name $apiAppName `
+        --resource-group $resourceGroup `
+        --query properties.latestRevisionName `
+        -o tsv `
+        --only-show-errors
+    if (-not $apiRevision) { throw "The classifier API has no latest revision." }
+    Wait-RevisionHealthy $apiAppName $resourceGroup $apiRevision $modelReadyTimeoutMinutes
+
+    $apiFqdn = az containerapp show `
+        --name $apiAppName `
+        --resource-group $resourceGroup `
+        --query properties.configuration.ingress.fqdn `
+        -o tsv `
+        --only-show-errors
+    if (-not $apiFqdn) { throw "The classifier API has no external FQDN." }
+    $classifierEndpoint = "https://$apiFqdn"
+    $headers = @{ Authorization = "Bearer $classifierApiKey" }
+
+    Write-Host "Waiting for Winnow to download, load on the T4, and pass a real warm-up decision..."
+    $ready = Wait-Ready "$classifierEndpoint/readyz" $modelReadyTimeoutMinutes
+
+    $sampleBody = @{ text = "set an alarm for seven tomorrow morning" } | ConvertTo-Json
+    $winnowResult = Invoke-RestMethod `
+        -Method Post `
+        -Uri "$classifierEndpoint/v1/classify/winnow" `
+        -Headers $headers `
+        -ContentType "application/json" `
+        -Body $sampleBody `
+        -TimeoutSec 180
+    if (-not $winnowResult.intent.label) {
+        throw "The Winnow smoke test did not return an intent."
+    }
+
+    $azureIntent = $null
+    if ($deploymentMode -eq "full") {
+        $azureResult = Invoke-RestMethod `
+            -Method Post `
+            -Uri "$classifierEndpoint/v1/classify/azure" `
+            -Headers $headers `
+            -ContentType "application/json" `
+            -Body $sampleBody `
+            -TimeoutSec 180
+        if (-not $azureResult.intent.label) {
+            throw "The GPT-5.4 Nano smoke test did not return an intent."
+        }
+        $azureIntent = $azureResult.intent.label
+    }
+
+    $workloadProfile = az containerapp show `
+        --name $ollayaAppName `
+        --resource-group $resourceGroup `
+        --query properties.workloadProfileName `
+        -o tsv `
+        --only-show-errors
+    if ($workloadProfile -ne $gpuWorkloadProfileName) {
+        throw "Ollaya is using workload profile $workloadProfile instead of $gpuWorkloadProfileName."
+    }
+
+    azd env set CLASSIFIER_ENDPOINT $classifierEndpoint | Out-Null
+    $localConfiguration = @{
+        endpoint = $classifierEndpoint
+        apiKey = $classifierApiKey
+        deploymentMode = $deploymentMode
+    }
+    $localConfiguration | ConvertTo-Json -Depth 5 | Set-Content `
+        (Join-Path $repoRoot "classifier.local.json") `
+        -Encoding utf8NoBOM
+
+    Write-Host ""
+    Write-Host "Deployment complete."
+    Write-Host "Classifier endpoint: $classifierEndpoint"
+    Write-Host "Deployment mode: $deploymentMode"
+    Write-Host "GPU workload profile: $workloadProfile"
+    Write-Host "Winnow warm-up: $($ready.warmupDurationMs) ms"
+    Write-Host "Winnow device: $($ready.device)"
+    Write-Host "Winnow VRAM bytes: $($ready.sizeVramBytes)"
+    Write-Host "Winnow smoke-test intent: $($winnowResult.intent.label)"
+    if ($azureIntent) {
+        Write-Host "GPT-5.4 Nano smoke-test intent: $azureIntent"
+    }
+    Write-Host "Local configuration: classifier.local.json"
+} finally {
+    Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
