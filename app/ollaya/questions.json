@@ -1,0 +1,28 @@
+{
+  "route": {
+    "type": "choice",
+    "instructions": "Choose the least expensive model tier that can complete this coding-agent request reliably.",
+    "criteria": {
+      "trivial": "A narrow, explicit, low-risk task such as formatting, renaming, a direct lookup, a tiny edit, or a simple single-step transformation.",
+      "normal": "A typical implementation, test, refactor, or debugging task that needs several steps but uses familiar patterns and has clear success criteria.",
+      "hard": "A high-risk, ambiguous, cross-system, architectural, security-sensitive, migration, or deep debugging task where mistakes are costly or substantial reasoning is required."
+    }
+  },
+  "deep_reasoning": {
+    "type": "noul",
+    "instructions": "Does this request require deep multi-step reasoning, resolving ambiguity, or evaluating significant tradeoffs?"
+  },
+  "complexity": {
+    "type": "score",
+    "instructions": "How demanding is this request for a capable coding agent?",
+    "criteria": [
+      "Small and mechanical",
+      "Moderate engineering work",
+      "Complex or high-risk engineering work"
+    ]
+  },
+  "concurrency_state": {
+    "type": "noul",
+    "instructions": "Does this request involve concurrency, asynchronous race conditions, stale writes, request deduplication, synchronization, ordering, or consistency guarantees?"
+  }
+}

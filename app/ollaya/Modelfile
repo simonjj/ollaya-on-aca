@@ -1,0 +1,4 @@
+FROM laya:en
+QUESTIONS ./questions.json
+PARAMETER precision fp32
+DESCRIPTION Routes coding-agent requests to trivial, normal, or hard model tiers

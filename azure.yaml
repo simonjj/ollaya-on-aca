@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: ollaya-on-aca
+metadata:
+  template: ollaya-on-aca@0.1.0
+
+infra:
+  provider: bicep
+  path: infra
+  module: main
+  parameters:
+    lunaCapacity:
+      value: ${LUNA_CAPACITY}
+    terraCapacity:
+      value: ${TERRA_CAPACITY}
+    solCapacity:
+      value: ${SOL_CAPACITY}
+
+hooks:
+  preprovision:
+    windows:
+      shell: pwsh
+      run: hooks/preprovision.ps1
+      interactive: false
+      continueOnError: false
+    posix:
+      shell: sh
+      run: hooks/preprovision.sh
+      interactive: false
+      continueOnError: false
+  postprovision:
+    windows:
+      shell: pwsh
+      run: hooks/postprovision.ps1
+      interactive: false
+      continueOnError: false
+    posix:
+      shell: sh
+      run: hooks/postprovision.sh
+      interactive: false
+      continueOnError: false

@@ -1,0 +1,7 @@
+.azure/
+.env
+node_modules/
+opencode.local.json
+benchmark-work/
+instructions.md
+*.log
