@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="misc/images/architecture.svg" alt="MASSIVE intent classification with Ollaya Winnow and Azure OpenAI on Azure Container Apps" width="1000">
+  <img src="misc/images/azure-container-apps-meets-ollaya.png" alt="Azure Container Apps meets Ollaya: run decision models on serverless GPU" width="1000">
 </p>
 
 # Ollaya Decision Model on Azure Container Apps
@@ -72,19 +72,9 @@ This is not an equivalence claim. Winnow is a local decision model that returns 
 
 ## Architecture
 
-```text
-Benchmark CLI or client
-          |
-          v
-Authenticated classifier API on ACA Consumption
-       |                         |
-       v                         v
-Internal Ollaya             Azure OpenAI
-winnow:e4b on T4            GPT-5.4 Nano
-       |
-       v
-Persistent Azure Files model cache
-```
+<p align="center">
+  <img src="misc/images/neon-azure-ai-architecture.png" alt="Architecture for benchmarking Ollaya Winnow on an Azure Container Apps T4 GPU against GPT-5.4 Nano" width="1000">
+</p>
 
 The public API uses a generated bearer token. Raw Ollaya ingress is internal to the Container Apps environment. Azure OpenAI local keys are disabled; the API calls Nano through a user-assigned managed identity.
 
